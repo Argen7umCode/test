@@ -7,6 +7,8 @@ Browser-accessible dashboard with real-time updates and full bot control.
 import asyncio
 import aiohttp
 import ssl
+import logging
+from logging.handlers import RotatingFileHandler
 from bs4 import BeautifulSoup
 import re
 import random
@@ -52,11 +54,35 @@ CONFIG_FILE = DATA_DIR / "config.json"
 ACCOUNTS_FILE = DATA_DIR / "accounts.json"
 
 
-def log_debug(message: str):
-    """Записать отладочное сообщение в файл"""
-    with open(DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        f.write(f"[{timestamp}] {message}\n")
+logger = logging.getLogger("hh_bot")
+logger.setLevel(logging.DEBUG)
+_log_fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+_file_handler = RotatingFileHandler(
+    DEBUG_LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+)
+_file_handler.setLevel(logging.DEBUG)
+_file_handler.setFormatter(_log_fmt)
+
+_console_handler = logging.StreamHandler()
+_console_handler.setLevel(logging.INFO)
+_console_handler.setFormatter(_log_fmt)
+
+logger.addHandler(_file_handler)
+logger.addHandler(_console_handler)
+
+
+def log_debug(msg: str):
+    logger.debug(msg)
+
+def log_info(msg: str):
+    logger.info(msg)
+
+def log_warning(msg: str):
+    logger.warning(msg)
+
+def log_error(msg: str, exc_info: bool = False):
+    logger.error(msg, exc_info=exc_info)
 
 
 def _is_login_page(html: str) -> bool:
@@ -273,7 +299,7 @@ def load_accounts():
             accounts_data.clear()
             accounts_data.extend(data)
     except Exception as e:
-        log_debug(f"load_accounts error: {e}")
+        log_error(f"load_accounts error: {e}")
 
 
 _CONFIG_KEYS = [
@@ -337,7 +363,7 @@ def load_config():
             CONFIG.llm_profiles = [{"name": "Основной", "api_key": CONFIG.llm_api_key,
                 "base_url": CONFIG.llm_base_url, "model": CONFIG.llm_model, "enabled": True}]
     except Exception as e:
-        log_debug(f"load_config error: {e}")
+        log_error(f"load_config error: {e}")
 
 
 def add_applied(account_name: str, vacancy_id: str, info: dict = None):
@@ -609,7 +635,7 @@ def parse_ids(html: str) -> set:
         m = re.search(r"/vacancy/(\d+)", link["href"])
         if m:
             ids.add(m.group(1))
-    log_debug(f"🔍 Парсинг: найдено {len(ids)} вакансий")
+    log_info(f"Парсинг: найдено {len(ids)} вакансий")
     return ids
 
 
@@ -714,10 +740,10 @@ async def fetch_page(session, url, sem):
             await asyncio.sleep(0.05)
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 html = await r.text()
-                log_debug(f"✅ URL: {url} | Статус: {r.status} | Размер: {len(html)}")
+                log_debug(f"URL: {url} | Статус: {r.status} | Размер: {len(html)}")
                 return html
         except Exception as e:
-            log_debug(f"❌ ОШИБКА при загрузке: {url} | {type(e).__name__}: {e}")
+            log_error(f"Ошибка при загрузке: {url} | {type(e).__name__}: {e}")
             return ""
 
 
@@ -914,7 +940,7 @@ async def fill_and_submit_questionnaire(acc: dict, vid: str,
             questions, field_answers = _parse_questionnaire_fields(html)
 
             if not field_answers:
-                log_debug(f"Questionnaire: no task fields found for {vid}")
+                log_warning(f"Questionnaire: no task fields found for {vid}")
                 return "test", {}
 
             # LLM-заполнение опросника (если включено)
@@ -927,7 +953,7 @@ async def fill_and_submit_questionnaire(acc: dict, vid: str,
                         field_answers[f] = llm_ans[f]
                     log_debug(f"Questionnaire {vid}: LLM заполнил {len(overridden)}/{len(field_answers)} полей: {overridden}")
                 else:
-                    log_debug(f"Questionnaire {vid}: LLM вернул пустой ответ, используем шаблоны")
+                    log_warning(f"Questionnaire {vid}: LLM вернул пустой ответ, используем шаблоны")
 
             log_debug(f"Questionnaire {vid}: {len(field_answers)} fields, {len(questions)} questions")
             for name, val in field_answers.items():
@@ -966,7 +992,7 @@ async def fill_and_submit_questionnaire(acc: dict, vid: str,
                     return "limit", {}
                 # Редирект назад на форму — ошибка валидации
                 if "withoutTest=no" in location or f"vacancyId={vid}" in location:
-                    log_debug(f"Questionnaire {vid}: form rejected, redirect back")
+                    log_warning(f"Questionnaire {vid}: form rejected, redirect back")
                     return "test", {}
                 return "sent", {}
 
@@ -980,13 +1006,13 @@ async def fill_and_submit_questionnaire(acc: dict, vid: str,
             return "test", {}
 
     except Exception as e:
-        log_debug(f"fill_and_submit_questionnaire error: {e}")
+        log_error(f"fill_and_submit_questionnaire error: {e}")
         return "error", {"exception": str(e)}
 
 
 async def send_response_async(acc: dict, vid: str) -> tuple:
     """Асинхронная отправка отклика. Возвращает (результат, инфо)"""
-    log_debug(f"📤 ОТПРАВКА ОТКЛИКА на вакансию {vid} | Аккаунт: {acc['name']}")
+    log_info(f"ОТПРАВКА ОТКЛИКА на вакансию {vid} | Аккаунт: {acc['name']}")
 
     headers = get_headers(acc["cookies"]["_xsrf"])
 
@@ -1209,7 +1235,7 @@ def fetch_hh_negotiations_stats(acc: dict, max_pages: int = 20) -> dict:
                 break
 
         except Exception as e:
-            log_debug(f"fetch_hh_negotiations_stats interviews page={page} error: {e}")
+            log_error(f"fetch_hh_negotiations_stats interviews page={page} error: {e}")
             break
 
     if result["auth_error"]:
@@ -1254,7 +1280,7 @@ def fetch_hh_negotiations_stats(acc: dict, max_pages: int = 20) -> dict:
                 break
 
         except Exception as e:
-            log_debug(f"fetch_hh_negotiations_stats general page={page} error: {e}")
+            log_error(f"fetch_hh_negotiations_stats general page={page} error: {e}")
             break
 
     return result
@@ -1285,7 +1311,7 @@ def _fetch_chat_list(acc: dict, max_pages: int = 5) -> tuple:
                 break
             data = resp.json()
         except Exception as e:
-            log_debug(f"_fetch_chat_list error: {e}")
+            log_error(f"_fetch_chat_list error: {e}")
             break
 
         chats_data = data.get("chats", {})
@@ -1348,7 +1374,7 @@ def _build_thread_from_chat_item(item: dict, display_info: dict, cur_pid: str, n
     if lock_reason:
         result["chat_locked"] = lock_reason
         result["last_msg_id"] = last_msg_id or str(hash(last_text))
-        log_debug(f"_build_thread {neg_id}: чат заблокирован — {lock_reason!r}")
+        log_warning(f"_build_thread {neg_id}: чат заблокирован — {lock_reason!r}")
         return result
 
     # Sender: compare participantId with currentParticipantId
@@ -1393,12 +1419,12 @@ def fetch_negotiation_thread(acc: dict, neg_id: str) -> dict:
         item = items_by_id.get(str(neg_id))
         if not item:
             result["error"] = "чат не найден"
-            log_debug(f"fetch_negotiation_thread {neg_id}: not in {list(items_by_id.keys())[:5]}")
+            log_warning(f"fetch_negotiation_thread {neg_id}: not in {list(items_by_id.keys())[:5]}")
             return result
         return _build_thread_from_chat_item(item, display_info, cur_pid, neg_id)
     except Exception as e:
         result["error"] = str(e)
-        log_debug(f"fetch_negotiation_thread {neg_id}: {e}")
+        log_error(f"fetch_negotiation_thread {neg_id}: {e}")
     return result
 
 
@@ -1426,7 +1452,7 @@ def _fetch_chat_history(acc: dict, chat_id: str, max_messages: int = 20) -> list
             verify=False,
         )
         if r.status_code != 200:
-            log_debug(f"_fetch_chat_history {chat_id}: HTTP {r.status_code}")
+            log_error(f"_fetch_chat_history {chat_id}: HTTP {r.status_code}")
             return []
         data = r.json()
         cur_pid = str(data.get("chat", {}).get("currentParticipantId", ""))
@@ -1452,7 +1478,7 @@ def _fetch_chat_history(acc: dict, chat_id: str, max_messages: int = 20) -> list
         # Return last max_messages entries (most recent context)
         return conversation[-max_messages:]
     except Exception as e:
-        log_debug(f"_fetch_chat_history {chat_id}: {e}")
+        log_error(f"_fetch_chat_history {chat_id}: {e}")
         return []
 
 
@@ -1475,7 +1501,7 @@ def _ensure_chatik_cookies(acc: dict) -> None:
                 acc["cookies"][cookie.name] = cookie.value
                 log_debug(f"_ensure_chatik_cookies: got {cookie.name} for {acc.get('name', '?')}")
     except Exception as e:
-        log_debug(f"_ensure_chatik_cookies error: {e}")
+        log_error(f"_ensure_chatik_cookies error: {e}")
 
 
 def send_negotiation_message(acc: dict, neg_id: str, text: str, topic_id: str = "") -> bool:
@@ -1503,7 +1529,7 @@ def send_negotiation_message(acc: dict, neg_id: str, text: str, topic_id: str = 
             timeout=15,
             verify=False,
         )
-        log_debug(f"send via chatik/api/send {neg_id}: HTTP {resp.status_code} | {resp.text[:300]}")
+        log_info(f"send via chatik/api/send {neg_id}: HTTP {resp.status_code} | {resp.text[:300]}")
         if resp.status_code in (200, 201, 204):
             return True
         if resp.status_code == 409:
@@ -1511,7 +1537,7 @@ def send_negotiation_message(acc: dict, neg_id: str, text: str, topic_id: str = 
             return "chat_not_found"
         return False
     except Exception as e:
-        log_debug(f"send_negotiation_message {neg_id} error: {e}")
+        log_error(f"send_negotiation_message {neg_id} error: {e}")
         return False
 
 
@@ -1519,7 +1545,7 @@ def generate_llm_reply(conversation: list, employer_name: str = "", cover_letter
     """Generate a reply to employer using configured LLM (OpenAI-compatible API)."""
     global _llm_rr_index
     if not _openai_available:
-        log_debug("generate_llm_reply: openai package not installed")
+        log_warning("generate_llm_reply: openai package not installed")
         return ""
 
     # Build profiles list: use multi-profile config if available, else fall back to legacy fields
@@ -1568,10 +1594,10 @@ def generate_llm_reply(conversation: list, employer_name: str = "", cover_letter
                 temperature=0.7,
             )
             result = resp.choices[0].message.content.strip()
-            log_debug(f"generate_llm_reply: {pname} → {len(result)} симв.")
+            log_info(f"generate_llm_reply: {pname} → {len(result)} симв.")
             return result
         except Exception as e:
-            log_debug(f"generate_llm_reply roundrobin {pname} error: {e}")
+            log_error(f"generate_llm_reply roundrobin {pname} error: {e}")
             return ""
     else:
         # Fallback mode: try each profile in order, return first successful result
@@ -1588,12 +1614,12 @@ def generate_llm_reply(conversation: list, employer_name: str = "", cover_letter
                     temperature=0.7,
                 )
                 result = resp.choices[0].message.content.strip()
-                log_debug(f"generate_llm_reply: {pname} → {len(result)} симв.")
+                log_info(f"generate_llm_reply: {pname} → {len(result)} симв.")
                 return result
             except Exception as e:
-                log_debug(f"generate_llm_reply fallback {pname} error: {e}")
+                log_error(f"generate_llm_reply fallback {pname} error: {e}")
                 continue
-        log_debug("generate_llm_reply: все профили вернули ошибку")
+        log_error("generate_llm_reply: все профили вернули ошибку")
         return ""
 
 
@@ -1660,7 +1686,7 @@ def generate_llm_questionnaire_answers(rich_questions: list, vacancy_title: str 
                 answers = json.loads(json_m.group())
                 return {k: str(v) for k, v in answers.items() if v is not None}
         except Exception as e:
-            log_debug(f"generate_llm_questionnaire_answers {pname} error: {e}")
+            log_error(f"generate_llm_questionnaire_answers {pname} error: {e}")
             if i < len(profiles) - 1:
                 continue
     return {}
@@ -1729,7 +1755,7 @@ def fetch_resume_stats(acc: dict) -> dict:
                 result["free_touches"] = to_update["count"]
 
     except Exception as e:
-        log_debug(f"fetch_resume_stats error: {e}")
+        log_error(f"fetch_resume_stats error: {e}")
     return result
 
 
@@ -1797,7 +1823,7 @@ def fetch_resume_view_history(acc: dict, limit: int = 50) -> list:
                         "vacancy": "",
                     })
     except Exception as e:
-        log_debug(f"fetch_resume_view_history error: {e}")
+        log_error(f"fetch_resume_view_history error: {e}")
     return result
 
 
@@ -1992,17 +2018,17 @@ def fetch_resume_text(acc: dict) -> str:
             timeout=15,
         )
         if r.status_code != 200:
-            log_debug(f"fetch_resume_text: HTTP {r.status_code} для {resume_hash[:8]}")
+            log_error(f"fetch_resume_text: HTTP {r.status_code} для {resume_hash[:8]}")
             return ""
         text = _parse_resume_html(r.text)
         if text:
             _resume_cache[resume_hash] = (text, now)
-            log_debug(f"fetch_resume_text: ✅ {len(text)} симв. для {resume_hash[:8]}")
+            log_info(f"fetch_resume_text: {len(text)} симв. для {resume_hash[:8]}")
         else:
-            log_debug(f"fetch_resume_text: ⚠️ пустой результат для {resume_hash[:8]}")
+            log_warning(f"fetch_resume_text: пустой результат для {resume_hash[:8]}")
         return text
     except Exception as e:
-        log_debug(f"fetch_resume_text error: {e}")
+        log_error(f"fetch_resume_text error: {e}")
         return ""
 
 
@@ -2055,7 +2081,7 @@ def auto_decline_discards(acc: dict) -> int:
             except Exception:
                 pass
     except Exception as e:
-        log_debug(f"auto_decline_discards error: {e}")
+        log_error(f"auto_decline_discards error: {e}")
     return declined
 
 
@@ -2085,7 +2111,7 @@ def fetch_hh_possible_offers(acc: dict) -> list:
                 offers.append({"name": name, "vacancyNames": vacancy_names})
             return offers
     except Exception as e:
-        log_debug(f"fetch_hh_possible_offers error: {e}")
+        log_error(f"fetch_hh_possible_offers error: {e}")
     return []
 
 
@@ -2220,10 +2246,10 @@ class ConnectionManager:
             try:
                 await ws.send_json(data)
             except TypeError as e:
-                log_debug(f"broadcast serialize error (bug — check datetimes in snapshot): {e}")
+                log_error(f"broadcast serialize error (bug — check datetimes in snapshot): {e}")
                 # Don't drop the WS on serialization errors — fix the data instead
             except Exception as e:
-                log_debug(f"broadcast ws error: {type(e).__name__}: {e}")
+                log_error(f"broadcast ws error: {type(e).__name__}: {e}")
                 dead.append(ws)
         for ws in dead:
             if ws in self.active:
@@ -2259,11 +2285,6 @@ class BotManager:
             entry = _url_entry(item)
             if entry["url"] and "resume=" not in entry["url"]:
                 urls.append(entry["url"])
-        # Добавляем resume-URL в пул, если ещё нет
-        pool_urls = [_url_entry(u)["url"] for u in CONFIG.url_pool]
-        if resume_url not in pool_urls:
-            CONFIG.url_pool.append({"url": resume_url, "pages": CONFIG.pages_per_url})
-            save_config()
         return urls
 
     def activate_session(self, temp_idx: int) -> bool:
@@ -2275,6 +2296,7 @@ class BotManager:
             return False
         if temp_idx in self.temp_states:
             return True  # уже запущен
+        saved_urls = ts.get("urls", [])
         acc = {
             "name": ts["name"],
             "short": ts.get("short", ts["name"]),
@@ -2282,7 +2304,8 @@ class BotManager:
             "resume_hash": ts["resume_hash"],
             "letter": ts.get("letter", ""),
             "cookies": ts.get("cookies", {}),
-            "urls": self._build_session_urls(ts["resume_hash"]),
+            "urls": saved_urls if saved_urls else self._build_session_urls(ts["resume_hash"]),
+            "url_pages": ts.get("url_pages", {}),
         }
         state = AccountState(acc)
         self.temp_states[temp_idx] = state
@@ -3150,7 +3173,7 @@ class BotManager:
 
             for result in task_results:
                 if isinstance(result, Exception):
-                    log_debug(f"❌ Ошибка при загрузке: {result}")
+                    log_error(f"Ошибка при загрузке: {result}")
                     continue
                 url, ids, salaries, meta = result
                 results_by_url[url].extend(ids)
@@ -3165,7 +3188,7 @@ class BotManager:
             return
         # Non-blocking: if another thread is already processing this account, skip
         if not state._llm_lock.acquire(blocking=False):
-            log_debug(f"LLM [{state.short}]: уже выполняется, пропуск")
+            log_warning(f"LLM [{state.short}]: уже выполняется, пропуск")
             return
         try:
             self._process_llm_replies_inner(state)
@@ -3250,7 +3273,7 @@ class BotManager:
                       f"permissions={item.get('permissions')} actions={item.get('actions')}")
             candidates.append(item_id)
 
-        log_debug(f"LLM [{state.short}]: {len(candidates)} кандидатов (прочитанных: {skipped_read}, наших: {skipped_ours}, системных: {skipped_system})")
+        log_info(f"LLM [{state.short}]: {len(candidates)} кандидатов (прочитанных: {skipped_read}, наших: {skipped_ours}, системных: {skipped_system})")
         if not candidates:
             self._add_log(state.short, state.color,
                 f"🤖 LLM: нет новых сообщений (прочит.: {skipped_read}, наших: {skipped_ours}, сист.: {skipped_system}, закрыт: {skipped_locked})", "info")
@@ -3301,7 +3324,7 @@ class BotManager:
                 # Chat locked: employer disabled messaging or invite-only — skip permanently
                 if thread.get("chat_locked"):
                     lock_reason = thread["chat_locked"]
-                    log_debug(f"LLM [{state.short}] {neg_id}: переписка недоступна — {lock_reason!r}")
+                    log_warning(f"LLM [{state.short}] {neg_id}: переписка недоступна — {lock_reason!r}")
                     self._add_log(state.short, state.color,
                         f"🤖 [{employer_short}] 🔒 переписка недоступна, пропуск", "warning", neg_id=neg_id)
                     state.llm_replied_msgs.add((neg_id, "locked"))  # permanent skip
@@ -3383,10 +3406,10 @@ class BotManager:
                 reply_text = generate_llm_reply(conversation, thread.get("employer_name", ""), cover_letter, resume_text)
                 if not reply_text:
                     self._add_log(state.short, state.color, f"🤖 [{employer_short}] LLM вернул пустой ответ, повтор через 30м", "warning", neg_id=neg_id)
-                    log_debug(f"LLM [{state.short}] {neg_id}: пустой ответ от LLM, ставим temp_skip 30м")
+                    log_warning(f"LLM [{state.short}] {neg_id}: пустой ответ от LLM, ставим temp_skip 30м")
                     state._llm_temp_skip[key] = time.time() + 1800  # retry in 30 min
                     continue
-                log_debug(f"LLM [{state.short}] {neg_id}: ответ получен ({len(reply_text)} симв.), отправляю")
+                log_info(f"LLM [{state.short}] {neg_id}: ответ получен ({len(reply_text)} симв.), отправляю")
 
                 ts = datetime.now().strftime("%d.%m %H:%M")
 
@@ -3402,7 +3425,7 @@ class BotManager:
                         self._llm_sent_global.add(global_key)
                     self._add_log(state.short, state.color,
                         f"🤖 [{employer_short}] отправляю: «{reply_text[:60]}»", "info", neg_id=neg_id)
-                    log_debug(f"LLM [{state.short}] {neg_id}: отправляю сообщение в chatik")
+                    log_info(f"LLM [{state.short}] {neg_id}: отправляю сообщение в chatik")
                     ok = send_negotiation_message(state.acc, neg_id, reply_text, topic_id=thread.get("topic_id", ""))
                     if ok == "chat_not_found":
                         with self._llm_sent_lock:
@@ -3459,7 +3482,7 @@ class BotManager:
 
                 time.sleep(3)  # rate limit between messages
             except Exception as e:
-                log_debug(f"_process_llm_replies {neg_id}: {e}")
+                log_error(f"_process_llm_replies {neg_id}: {e}")
                 # Release any reserved global dedup slot for this neg_id that may have been
                 # reserved before the exception occurred but not yet cleaned up
                 try:
@@ -3470,7 +3493,7 @@ class BotManager:
                     pass
 
         if replied:
-            log_debug(f"LLM auto-reply [{state.short}]: {replied} ответов отправлено")
+            log_info(f"LLM auto-reply [{state.short}]: {replied} ответов отправлено")
 
     def _fetch_hh_stats_worker(self, idx: int, state: AccountState) -> None:
         """Thread worker for HH stats polling"""
@@ -3535,7 +3558,7 @@ class BotManager:
                         "success",
                     )
 
-                log_debug(
+                log_info(
                     f"HH stats {state.short}: {stats['interview']} интервью, "
                     f"{rs['views']} просмотров резюме, {rs['new_invitations_total']} новых инвайтов"
                 )
@@ -3557,7 +3580,7 @@ class BotManager:
                     self._add_log(state.short, state.color, f"🤖 LLM: проверяю {_neg_count} переговоров…", "info")
                     self._process_llm_replies(state)
             except Exception as e:
-                log_debug(f"HH stats fetch error ({state.short}): {e}")
+                log_error(f"HH stats fetch error ({state.short}): {e}")
             finally:
                 state.hh_stats_loading = False
 
@@ -3616,7 +3639,7 @@ async def websocket_endpoint(ws: WebSocket):
                         save_config()
                         bot._add_log("", "", f"⚙️ {key} = {value}", "info")
                     except Exception as e:
-                        log_debug(f"set_config error: {e}")
+                        log_error(f"set_config error: {e}")
             elif cmd == "set_questionnaire":
                 templates = data.get("templates")
                 default = data.get("default_answer")
@@ -3980,7 +4003,6 @@ async def api_set_urls(idx: int, request: Request):
     """Обновить список поисковых URL аккаунта и индивидуальную глубину поиска."""
     body = await request.json()
     urls = [u.strip() for u in body.get("urls", []) if u.strip()]
-    # url_pages: {url: pages} — индивидуальная глубина, 0/None = использовать глобальное
     url_pages = {k: int(v) for k, v in body.get("url_pages", {}).items() if v}
     if 0 <= idx < len(bot.account_states):
         bot.account_states[idx].acc["urls"] = urls
@@ -3990,6 +4012,17 @@ async def api_set_urls(idx: int, request: Request):
             accounts_data[idx]["urls"] = urls
             accounts_data[idx]["url_pages"] = url_pages
             save_accounts()
+        return {"ok": True, "count": len(urls)}
+    temp_idx = idx - len(bot.account_states)
+    state = bot.temp_states.get(temp_idx)
+    if state:
+        state.acc["urls"] = urls
+        state.acc["url_pages"] = url_pages
+        state.total_urls = len(urls)
+        if 0 <= temp_idx < len(bot.temp_sessions):
+            bot.temp_sessions[temp_idx]["urls"] = urls
+            bot.temp_sessions[temp_idx]["url_pages"] = url_pages
+            save_browser_sessions(bot.temp_sessions)
         return {"ok": True, "count": len(urls)}
     return {"ok": False, "error": "Аккаунт не найден"}
 
@@ -4042,7 +4075,7 @@ async def api_update_cookies(idx: int, body: dict):
         if 0 <= idx < len(accounts_data):
             accounts_data[idx]["cookies"] = auth_cookies
             save_accounts()
-        log_debug(f"update_cookies [{state.name}]: обновлены куки ({len(auth_cookies)} ключей)")
+        log_info(f"update_cookies [{state.name}]: обновлены куки ({len(auth_cookies)} ключей)")
         return {"ok": True, "name": state.name, "keys": list(auth_cookies.keys())}
 
     # Обновляем temp сессию
@@ -4056,7 +4089,7 @@ async def api_update_cookies(idx: int, body: dict):
             bot.temp_states[temp_idx].cookies_expired = False  # сбрасываем флаг
         save_browser_sessions(bot.temp_sessions)
         name = bot.temp_sessions[temp_idx].get("name", f"Браузер #{temp_idx+1}")
-        log_debug(f"update_cookies [temp {temp_idx}] {name}: обновлены куки ({len(auth_cookies)} ключей)")
+        log_info(f"update_cookies [temp {temp_idx}] {name}: обновлены куки ({len(auth_cookies)} ключей)")
         return {"ok": True, "name": name, "keys": list(auth_cookies.keys())}
 
     return {"ok": False, "error": "Аккаунт не найден"}
@@ -4934,7 +4967,7 @@ async def api_llm_run_now():
             try:
                 bot._process_llm_replies(state)
             except Exception as e:
-                log_debug(f"llm_run_now {state.short}: {e}")
+                log_error(f"llm_run_now {state.short}: {e}")
     threading.Thread(target=_run, daemon=True).start()
     return {"started": True, "accounts": len(bot.account_states) + len(bot.temp_states)}
 
@@ -5026,7 +5059,7 @@ async def broadcast_loop():
                 snapshot = bot.get_state_snapshot()
                 await manager.broadcast(snapshot)
         except Exception as e:
-            log_debug(f"broadcast_loop error: {e}")
+            log_error(f"broadcast_loop error: {e}")
         await asyncio.sleep(0.3)
 
 
