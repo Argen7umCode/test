@@ -1596,6 +1596,8 @@ const T = {
     // Settings param labels
     lbl_pages_per_url: 'Страниц на URL',
     hint_pages_per_url: 'Сколько страниц результатов загружать для каждого поискового запроса',
+    lbl_page_fetch_delay_ms: 'Пауза перед страницей поиска (мс)',
+    hint_page_fetch_delay_ms: 'Минимальный интервал между стартами загрузки страниц выдачи (общая очередь на процесс). 0 = без ограничения.',
     lbl_response_delay: 'Задержка отклика (с)',
     hint_response_delay: 'Пауза между пачками откликов в секундах',
     lbl_pause_between_cycles: 'Пауза между циклами (с)',
@@ -1825,6 +1827,8 @@ const T = {
     // Settings param labels
     lbl_pages_per_url: 'Pages per URL',
     hint_pages_per_url: 'How many result pages to load per search query',
+    lbl_page_fetch_delay_ms: 'Delay before each search page (ms)',
+    hint_page_fetch_delay_ms: 'Minimum time between search-page fetch starts (one global queue per process). 0 = off.',
     lbl_response_delay: 'Reply delay (s)',
     hint_response_delay: 'Pause between reply batches in seconds',
     lbl_pause_between_cycles: 'Pause between cycles (s)',
@@ -1984,6 +1988,7 @@ const DBSort      = { field: 'at', dir: -1 };
 // Settings config definition
 const SETTINGS_DEF = [
   { key: 'pages_per_url',        labelKey: 'lbl_pages_per_url',        descKey: 'hint_pages_per_url',        min: 5,  max: 100, step: 5  },
+  { key: 'page_fetch_delay_ms',  labelKey: 'lbl_page_fetch_delay_ms',  descKey: 'hint_page_fetch_delay_ms',  min: 0,  max: 3000, step: 50 },
   { key: 'response_delay',       labelKey: 'lbl_response_delay',       descKey: 'hint_response_delay',       min: 0,  max: 30,  step: 1  },
   { key: 'pause_between_cycles', labelKey: 'lbl_pause_between_cycles', descKey: 'hint_pause_between_cycles', min: 15, max: 600, step: 15 },
   { key: 'batch_responses',      labelKey: 'lbl_batch_responses',      descKey: 'hint_batch_responses',      min: 1,  max: 10,  step: 1  },
@@ -4624,6 +4629,7 @@ async function applyTestsToggle(idx, cb) {
 // ── JSON Editor ─────────────────────────────────────────────────
 const JSON_CONFIG_TEMPLATE = {
   "pages_per_url": 3,
+  "page_fetch_delay_ms": 350,
   "max_concurrent": 5,
   "response_delay": 2,
   "pause_between_cycles": 5,

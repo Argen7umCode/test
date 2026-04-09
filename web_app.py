@@ -11,8 +11,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from bs4 import BeautifulSoup
 import re
-import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from glom import glom
 import json
 from pathlib import Path
@@ -306,6 +305,7 @@ _CONFIG_KEYS = [
     "pages_per_url", "max_concurrent", "response_delay", "pause_between_cycles",
     "limit_check_interval", "resume_touch_interval", "batch_responses", "min_salary",
     "auto_pause_errors", "questionnaire_default_answer", "llm_fill_questionnaire",
+    "page_fetch_delay_ms",
 ]
 
 
@@ -547,6 +547,7 @@ accounts_data: list = []
 class Config:
     """Глобальные настройки (можно менять в runtime)"""
     pages_per_url = 40
+    page_fetch_delay_ms = 350  # пауза перед каждым GET страницы поиска (0 = без паузы)
     max_concurrent = 20
     response_delay = 1
     pause_between_cycles = 60
@@ -608,7 +609,10 @@ def _url_entry(item) -> dict:
     """Нормализует элемент url_pool в {url, pages}."""
     if isinstance(item, str):
         return {"url": item.strip(), "pages": CONFIG.pages_per_url}
-    return {"url": item.get("url", "").strip(), "pages": int(item.get("pages", CONFIG.pages_per_url))}
+    p = int(item.get("pages", CONFIG.pages_per_url))
+    if p <= 0:
+        p = CONFIG.pages_per_url
+    return {"url": item.get("url", "").strip(), "pages": p}
 
 
 def _url_pages_map() -> dict:
@@ -628,15 +632,22 @@ def get_headers(xsrf: str) -> dict:
     }
 
 
-def parse_ids(html: str) -> set:
+def parse_ids(html: str) -> list:
+    """ID вакансий в порядке появления на странице (как в выдаче)."""
     soup = BeautifulSoup(html, "html.parser")
-    ids = set()
+    ordered = []
+    seen = set()
     for link in soup.find_all("a", href=re.compile(r"/vacancy/\d+")):
         m = re.search(r"/vacancy/(\d+)", link["href"])
-        if m:
-            ids.add(m.group(1))
-    log_info(f"Парсинг: найдено {len(ids)} вакансий")
-    return ids
+        if not m:
+            continue
+        vid = m.group(1)
+        if vid in seen:
+            continue
+        seen.add(vid)
+        ordered.append(vid)
+    log_info(f"Парсинг: найдено {len(ordered)} вакансий")
+    return ordered
 
 
 def parse_vacancy_meta(html: str) -> dict:
@@ -682,14 +693,15 @@ def parse_vacancy_meta(html: str) -> dict:
     return result
 
 
-def parse_salaries(html: str, ids: set) -> dict:
+def parse_salaries(html: str, ids) -> dict:
     """
     Извлекает зарплату (from, в рублях) для вакансий из HTML поисковой выдачи.
     Возвращает {vacancy_id: salary_from_rub_or_None}.
     Работает только если CONFIG.min_salary > 0 (иначе пустой результат).
     """
-    result = {vid: None for vid in ids}
-    if not ids or not CONFIG.min_salary:
+    id_set = set(ids)
+    result = {vid: None for vid in id_set}
+    if not id_set or not CONFIG.min_salary:
         return result
 
     # Ищем все блоки compensation в HTML и смотрим какая вакансия была упомянута
@@ -708,7 +720,7 @@ def parse_salaries(html: str, ids: set) -> dict:
         if not vid_matches:
             continue
         vid = vid_matches[-1]
-        if vid not in result or result[vid] is not None:
+        if vid not in id_set or result[vid] is not None:
             continue
 
         salary = int(from_m.group(1))
@@ -734,10 +746,30 @@ def extract_search_query(url: str) -> str:
     return "Поиск"
 
 
+_page_fetch_throttle_lock: asyncio.Lock | None = None
+_page_fetch_next_ok = 0.0
+
+
+async def _throttle_before_search_page_fetch() -> None:
+    global _page_fetch_throttle_lock, _page_fetch_next_ok
+    ms = max(0, int(CONFIG.page_fetch_delay_ms))
+    if not ms:
+        return
+    if _page_fetch_throttle_lock is None:
+        _page_fetch_throttle_lock = asyncio.Lock()
+    gap = ms / 1000.0
+    async with _page_fetch_throttle_lock:
+        now = time.monotonic()
+        wait = max(0.0, _page_fetch_next_ok - now)
+        _page_fetch_next_ok = now + wait + gap
+    if wait:
+        await asyncio.sleep(wait)
+
+
 async def fetch_page(session, url, sem):
+    await _throttle_before_search_page_fetch()
     async with sem:
         try:
-            await asyncio.sleep(0.05)
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 html = await r.text()
                 log_debug(f"URL: {url} | Статус: {r.status} | Размер: {len(html)}")
@@ -1759,6 +1791,33 @@ def fetch_resume_stats(acc: dict) -> dict:
     return result
 
 
+def _resume_view_ts_from_payload(views_raw, date_str: str) -> str:
+    if views_raw is None:
+        return date_str
+    if isinstance(views_raw, (int, float)):
+        sec = float(views_raw)
+        if sec > 1e12:
+            sec /= 1000.0
+        try:
+            return datetime.fromtimestamp(sec, tz=timezone.utc).strftime("%Y-%m-%d")
+        except (OSError, ValueError, OverflowError):
+            return date_str
+    if not isinstance(views_raw, (list, tuple)) or not views_raw:
+        return date_str
+    first = views_raw[0]
+    if isinstance(first, str) and first:
+        return first[:10] if len(first) >= 10 else first
+    if isinstance(first, (int, float)):
+        sec = float(first)
+        if sec > 1e12:
+            sec /= 1000.0
+        try:
+            return datetime.fromtimestamp(sec, tz=timezone.utc).strftime("%Y-%m-%d")
+        except (OSError, ValueError, OverflowError):
+            return date_str
+    return date_str
+
+
 def fetch_resume_view_history(acc: dict, limit: int = 50) -> list:
     """
     Кто смотрел резюме.
@@ -1784,14 +1843,19 @@ def fetch_resume_view_history(acc: dict, limit: int = 50) -> list:
         hist_views = hist_data.get("historyViews", {})
         years_list = hist_views.get("years", []) if isinstance(hist_views, dict) else []
         for year_entry in years_list:
+            if not isinstance(year_entry, dict):
+                continue
             for day_entry in year_entry.get("days", []):
+                if not isinstance(day_entry, dict):
+                    continue
                 day   = day_entry.get("day", 0)
                 month = day_entry.get("month", 0)
                 year  = year_entry.get("year", 0)
                 date_str = f"{year}-{month:02d}-{day:02d}"
                 for company in day_entry.get("companies", []):
-                    views_ts = company.get("views", [])
-                    ts = views_ts[0][:10] if views_ts else date_str
+                    if not isinstance(company, dict):
+                        continue
+                    ts = _resume_view_ts_from_payload(company.get("views"), date_str)
                     result.append({
                         "employer_id": str(company.get("id", "")),
                         "name": company.get("name", "").strip() or "Аноним",
@@ -2672,6 +2736,7 @@ class BotManager:
             "llm_log": list(self.llm_log),
             "config": {
                 "pages_per_url": CONFIG.pages_per_url,
+                "page_fetch_delay_ms": CONFIG.page_fetch_delay_ms,
                 "response_delay": CONFIG.response_delay,
                 "pause_between_cycles": CONFIG.pause_between_cycles,
                 "batch_responses": CONFIG.batch_responses,
@@ -2814,18 +2879,24 @@ class BotManager:
 
             all_vacancies = []
             for url in effective_urls:
-                url_vacancies = results_by_url.get(url, set())
-                state.vacancies_by_url[url] = len(url_vacancies)
-                all_vacancies.extend(url_vacancies)
+                url_list = results_by_url.get(url, [])
+                n_unique_url = len(set(url_list))
+                state.vacancies_by_url[url] = n_unique_url
+                all_vacancies.extend(url_list)
 
                 query = extract_search_query(url)
-                if url_vacancies:
-                    self._add_log(state.short, state.color, f"📊 {query}: {len(url_vacancies)}", "info")
-            # Сохраняем статистику по URL для снапшота
+                if url_list:
+                    self._add_log(state.short, state.color, f"📊 {query}: {n_unique_url}", "info")
             state.url_stats = dict(state.vacancies_by_url)
 
-            unique_vacancies = set(all_vacancies)
-            total_collected = len(unique_vacancies)
+            seen_collect = set()
+            ordered_vacancy_ids = []
+            for vid in all_vacancies:
+                if vid in seen_collect:
+                    continue
+                seen_collect.add(vid)
+                ordered_vacancy_ids.append(vid)
+            total_collected = len(ordered_vacancy_ids)
 
             self._add_log(
                 state.short, state.color,
@@ -2833,7 +2904,7 @@ class BotManager:
                 "info",
             )
 
-            if not unique_vacancies:
+            if not ordered_vacancy_ids:
                 state.status = "waiting"
                 state.status_detail = "Нет вакансий"
                 state.wait_until = now + timedelta(minutes=2)
@@ -2851,7 +2922,7 @@ class BotManager:
             test_count = 0
             salary_skipped = 0
 
-            for vid in unique_vacancies:
+            for vid in ordered_vacancy_ids:
                 if is_applied(acc["name"], vid):
                     already_count += 1
                     state.already_applied += 1
@@ -2888,7 +2959,6 @@ class BotManager:
                 time.sleep(120)
                 continue
 
-            random.shuffle(filtered)
             state.vacancies_queue = filtered
             state.total_vacancies = len(filtered)
             state.found_vacancies += len(all_vacancies)
@@ -3116,7 +3186,9 @@ class BotManager:
     async def _collect_all_urls_parallel(self, state: AccountState) -> tuple:
         """
         Параллельный сбор вакансий со ВСЕХ URL и страниц одновременно.
-        Возвращает (results_by_url: dict[url, set[ids]], salary_map: dict[vid, int|None])
+        Порядок в списках: как в effective_urls; внутри URL — страницы по возрастанию;
+        внутри страницы — как в HTML. Результаты gather сливаются в этом же порядке.
+        Возвращает (results_by_url: dict[url, list[ids]], salary_map: dict[vid, int|None])
         """
         acc = state.acc
         headers = get_headers(acc["cookies"]["_xsrf"])
@@ -3157,13 +3229,13 @@ class BotManager:
                 state.status_detail = f"Загрузка {completed}/{total_tasks}"
                 if html and _is_login_page(html):
                     state.cookies_expired = True
-                    return url, set(), {}, {}
+                    return url, [], {}, {}
                 if html:
                     ids = parse_ids(html)
                     salaries = parse_salaries(html, ids)
                     meta = parse_vacancy_meta(html)
                     return url, ids, salaries, meta
-                return url, set(), {}, {}
+                return url, [], {}, {}
 
             tasks = [
                 fetch_one(url_idx, url, page, page_url)
@@ -3180,7 +3252,7 @@ class BotManager:
                 salary_map.update(salaries)
                 state.vacancy_meta.update(meta)
 
-        return {url: set(ids) for url, ids in results_by_url.items()}, salary_map
+        return dict(results_by_url), salary_map
 
     def _process_llm_replies(self, state: AccountState) -> None:
         """Check recent unread negotiations for employer messages and auto-reply using LLM."""
