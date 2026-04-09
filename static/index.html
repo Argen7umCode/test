@@ -201,6 +201,44 @@ body {
   color: var(--dim);
   margin-bottom: 6px;
 }
+.acc-search-urls {
+  font-size: 11px;
+  margin-bottom: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.surl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-card2);
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  user-select: none;
+  max-width: 100%;
+}
+.surl-chip:hover { border-color: var(--blue); }
+.surl-chip.selected { border-color: var(--cyan); background: rgba(57,208,216,0.1); }
+.surl-chip .surl-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+}
+.surl-chip.selected .surl-label { color: var(--text); }
+.surl-chip .surl-count { color: var(--green); font-size: 10px; }
+.surl-chip .surl-link {
+  color: var(--blue);
+  font-size: 10px;
+  text-decoration: none;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+.surl-chip .surl-link:hover { opacity: 1; }
 .acc-hh-stats {
   font-size: 11px;
   background: var(--bg-card2);
@@ -1254,7 +1292,7 @@ textarea.apply-q-answer:focus { outline: none; border-color: var(--cyan); }
       <div style="margin-bottom:12px">
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
           <input type="checkbox" id="llm-fill-questionnaire" style="accent-color:var(--purple,#c084fc)"
-                 onchange="send({type:'set_config',key:'llm_fill_questionnaire',value:this.checked})">
+                 onchange="sendCmd({type:'set_config',key:'llm_fill_questionnaire',value:this.checked})">
           📝 Заполнять опросники нейронкой (textarea + radio + checkbox при откликах)
         </label>
         <div style="font-size:11px;color:var(--dim);margin-top:4px;margin-left:22px">
@@ -1558,6 +1596,8 @@ const T = {
     // Settings param labels
     lbl_pages_per_url: 'Страниц на URL',
     hint_pages_per_url: 'Сколько страниц результатов загружать для каждого поискового запроса',
+    lbl_page_fetch_delay_ms: 'Пауза перед страницей поиска (мс)',
+    hint_page_fetch_delay_ms: 'Минимальный интервал между стартами загрузки страниц выдачи (общая очередь на процесс). 0 = без ограничения.',
     lbl_response_delay: 'Задержка отклика (с)',
     hint_response_delay: 'Пауза между пачками откликов в секундах',
     lbl_pause_between_cycles: 'Пауза между циклами (с)',
@@ -1787,6 +1827,8 @@ const T = {
     // Settings param labels
     lbl_pages_per_url: 'Pages per URL',
     hint_pages_per_url: 'How many result pages to load per search query',
+    lbl_page_fetch_delay_ms: 'Delay before each search page (ms)',
+    hint_page_fetch_delay_ms: 'Minimum time between search-page fetch starts (one global queue per process). 0 = off.',
     lbl_response_delay: 'Reply delay (s)',
     hint_response_delay: 'Pause between reply batches in seconds',
     lbl_pause_between_cycles: 'Pause between cycles (s)',
@@ -1946,6 +1988,7 @@ const DBSort      = { field: 'at', dir: -1 };
 // Settings config definition
 const SETTINGS_DEF = [
   { key: 'pages_per_url',        labelKey: 'lbl_pages_per_url',        descKey: 'hint_pages_per_url',        min: 5,  max: 100, step: 5  },
+  { key: 'page_fetch_delay_ms',  labelKey: 'lbl_page_fetch_delay_ms',  descKey: 'hint_page_fetch_delay_ms',  min: 0,  max: 3000, step: 50 },
   { key: 'response_delay',       labelKey: 'lbl_response_delay',       descKey: 'hint_response_delay',       min: 0,  max: 30,  step: 1  },
   { key: 'pause_between_cycles', labelKey: 'lbl_pause_between_cycles', descKey: 'hint_pause_between_cycles', min: 15, max: 600, step: 15 },
   { key: 'batch_responses',      labelKey: 'lbl_batch_responses',      descKey: 'hint_batch_responses',      min: 1,  max: 10,  step: 1  },
@@ -2655,7 +2698,7 @@ async function urlPoolSave(btn) {
   if (btn) btn.disabled = true;
   if (st) { st.textContent = '⏳...'; st.style.color = 'var(--dim)'; }
   try {
-    send({type: 'set_url_pool', urls});
+    sendCmd({type: 'set_url_pool', urls});
     if (st) { st.textContent = `✅ Сохранено (${urls.length} URL)`; st.style.color = 'var(--green)'; }
   } catch(e) {
     if (st) { st.textContent = '❌ ' + e; st.style.color = 'var(--red)'; }
@@ -2749,6 +2792,24 @@ async function urlAccSave(accIdx, btn) {
     if (btn) btn.disabled = false;
     setTimeout(() => { if (st) st.textContent = ''; }, 4000);
   }
+}
+
+async function toggleUrlChip(accIdx, chip) {
+  const container = chip.parentElement;
+  if (!container) return;
+  container.setAttribute('data-editing', '1');
+  chip.classList.toggle('selected');
+  const urls = Array.from(container.querySelectorAll('.surl-chip.selected'))
+    .map(c => c.dataset.url).filter(Boolean);
+  const acc = State.lastSnapshot?.accounts?.find(a => a.idx === accIdx);
+  const url_pages = acc?.url_pages || {};
+  try {
+    await fetch(`/api/account/${accIdx}/set_urls`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({urls, url_pages})
+    });
+  } catch(e) { /* ignore */ }
+  setTimeout(() => container.removeAttribute('data-editing'), 2000);
 }
 
 // ── Main accounts management ──────────────────────────────────
@@ -3214,6 +3275,7 @@ function buildCardHTML(acc) {
       <div class="acc-vacancy-title c-dim">${t('card_waiting')}</div>
     </div>
     <div class="acc-meta" id="acc-meta-${acc.idx}"></div>
+    <div class="acc-search-urls" id="acc-surls-${acc.idx}" style="display:none"></div>
     <div class="acc-hh-stats" id="acc-hh-${acc.idx}">${t('card_hh_loading')}</div>
     <div class="acc-resume-stats" id="acc-rs-${acc.idx}" style="display:none">
       <span class="acc-resume-stat">👁️ <span id="acc-rs-views-${acc.idx}">0</span> ${t('rs_views')}</span>
@@ -3459,6 +3521,33 @@ function updateCard(card, acc) {
     if (acc.found_vacancies > 0) parts.push(`🔍 ${acc.found_vacancies} найдено`);
     if (acc.next_resume_touch) parts.push(`📤 резюме: ${acc.next_resume_touch}`);
     meta.textContent = parts.join('  ');
+  }
+
+  // Search URLs — clickable chips with selection
+  const surlsEl = document.getElementById('acc-surls-' + acc.idx);
+  if (surlsEl) {
+    const pool = State.lastSnapshot?.config?.url_pool || [];
+    const poolUrls = pool.map(item => typeof item === 'string' ? item : (item?.url || ''));
+    const allUrls = [...new Set([...poolUrls, ...Object.keys(acc.url_stats || {})])];
+    if (allUrls.length) {
+      const selected = new Set(acc.urls || []);
+      const editing = surlsEl.hasAttribute('data-editing');
+      if (!editing) {
+        surlsEl.style.display = '';
+        surlsEl.innerHTML = allUrls.map(url => {
+          const label = parseUrlFilter(url);
+          const cnt = acc.url_stats?.[url];
+          const sel = selected.has(url) ? ' selected' : '';
+          const cntHtml = cnt != null ? `<span class="surl-count">(${cnt})</span>` : '';
+          return `<span class="surl-chip${sel}" data-url="${esc(url)}" onclick="toggleUrlChip(${acc.idx},this)">` +
+            `<span class="surl-label">${label}</span>${cntHtml}` +
+            `<a class="surl-link" href="${esc(url)}" target="_blank" rel="noopener" title="Открыть на hh.ru" onclick="event.stopPropagation()">↗</a>` +
+            `</span>`;
+        }).join('');
+      }
+    } else {
+      surlsEl.style.display = 'none';
+    }
   }
 
   // HH stats
@@ -4540,6 +4629,7 @@ async function applyTestsToggle(idx, cb) {
 // ── JSON Editor ─────────────────────────────────────────────────
 const JSON_CONFIG_TEMPLATE = {
   "pages_per_url": 3,
+  "page_fetch_delay_ms": 350,
   "max_concurrent": 5,
   "response_delay": 2,
   "pause_between_cycles": 5,
